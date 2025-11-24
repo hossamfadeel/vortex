@@ -1,10 +1,10 @@
 // Copyright © 2019-2023
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 // http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,8 +18,8 @@ module VX_stream_switch #(
     parameter NUM_INPUTS    = 1,
     parameter NUM_OUTPUTS   = 1,
     parameter DATAW         = 1,
-    parameter OUT_REG       = 0,
-    parameter NUM_REQS      = (NUM_INPUTS > NUM_OUTPUTS) ? ((NUM_INPUTS + NUM_OUTPUTS - 1) / NUM_OUTPUTS) : ((NUM_OUTPUTS + NUM_INPUTS - 1) / NUM_INPUTS),
+    parameter OUT_BUF       = 0,
+    parameter NUM_REQS      = (NUM_INPUTS > NUM_OUTPUTS) ? `CDIV(NUM_INPUTS, NUM_OUTPUTS) : `CDIV(NUM_OUTPUTS, NUM_INPUTS),
     parameter SEL_COUNT     = `MIN(NUM_INPUTS, NUM_OUTPUTS),
     parameter LOG_NUM_REQS  = `CLOG2(NUM_REQS)
 ) (
@@ -33,132 +33,96 @@ module VX_stream_switch #(
     output wire [NUM_INPUTS-1:0]            ready_in,
 
     output wire [NUM_OUTPUTS-1:0]           valid_out,
-    output wire [NUM_OUTPUTS-1:0][DATAW-1:0] data_out,    
+    output wire [NUM_OUTPUTS-1:0][DATAW-1:0] data_out,
     input  wire [NUM_OUTPUTS-1:0]           ready_out
 );
-    if (NUM_INPUTS > NUM_OUTPUTS) begin
+    logic [NUM_OUTPUTS-1:0]            valid_out_w;
+    logic [NUM_OUTPUTS-1:0][DATAW-1:0] data_out_w;
+    logic [NUM_OUTPUTS-1:0]            ready_out_w;
 
-        wire [NUM_OUTPUTS-1:0][NUM_REQS-1:0]             valid_in_r;
-        wire [NUM_OUTPUTS-1:0][NUM_REQS-1:0][DATAW-1:0]  data_in_r;
+    if (NUM_INPUTS > NUM_OUTPUTS) begin : g_input_select
 
-        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin
-            for (genvar j = 0; j < NUM_REQS; ++j) begin
-                localparam ii = i * NUM_REQS + j;
-                if (ii < NUM_INPUTS) begin
-                    assign valid_in_r[i][j] = valid_in[ii];
-                    assign data_in_r[i][j]  = data_in[ii];
-                end else begin
-                    assign valid_in_r[i][j] = 0;
-                    assign data_in_r[i][j]  = '0;
+        for (genvar o = 0; o < NUM_OUTPUTS; ++o) begin : g_out_buf
+
+            logic [NUM_REQS-1:0] valid_in_w;
+            logic [NUM_REQS-1:0][DATAW-1:0] data_in_w;
+            logic [NUM_REQS-1:0] ready_in_w;
+
+            for (genvar r = 0; r < NUM_REQS; ++r) begin : g_r
+                localparam i = r * NUM_OUTPUTS + o;
+                if (i < NUM_INPUTS) begin : g_valid
+                    assign valid_in_w[r] = valid_in[i];
+                    assign data_in_w[r]  = data_in[i];
+                    assign ready_in[i]   = ready_in_w[r];
+                end else begin : g_padding
+                    assign valid_in_w[r] = 0;
+                    assign data_in_w[r]  = '0;
+                    `UNUSED_VAR (ready_in_w[r])
                 end
             end
-        end        
 
-        wire [NUM_OUTPUTS-1:0]            valid_out_r;
-        wire [NUM_OUTPUTS-1:0][DATAW-1:0] data_out_r;
-        wire [NUM_OUTPUTS-1:0]            ready_out_r;
+            assign valid_out_w[o] = valid_in_w[sel_in[o]];
+            assign data_out_w[o] = data_in_w[sel_in[o]];
 
-        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin
-            assign valid_out_r[i] = valid_in_r[i][sel_in[i]];
-            assign data_out_r[i]  = data_in_r[i][sel_in[i]];
-        end
-
-        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin
-            for (genvar j = 0; j < NUM_REQS; ++j) begin
-                localparam ii = i * NUM_REQS + j;                
-                if (ii < NUM_INPUTS) begin                    
-                    assign ready_in[ii] = ready_out_r[i] & (sel_in[i] == LOG_NUM_REQS'(j));
+            always @(*) begin
+                ready_in_w = '0;
+                for (integer o = 0; o < NUM_OUTPUTS; ++o) begin
+                    ready_in_w[sel_in[o]] = ready_out_w[o];
                 end
             end
         end
 
-        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin
+    end else if (NUM_OUTPUTS > NUM_INPUTS) begin : g_output_select
 
-            `RESET_RELAY_EN (out_buf_reset, reset, (NUM_OUTPUTS > 1));
+        // Inputs < Outputs
 
-            VX_elastic_buffer #(
-                .DATAW   (DATAW),
-                .SIZE    (`OUT_REG_TO_EB_SIZE(OUT_REG)),
-                .OUT_REG (`OUT_REG_TO_EB_REG(OUT_REG))
-            ) out_buf (
-                .clk       (clk),
-                .reset     (out_buf_reset),
-                .valid_in  (valid_out_r[i]),                    
-                .ready_in  (ready_out_r[i]),
-                .data_in   (data_out_r[i]),
-                .data_out  (data_out[i]),
-                .valid_out (valid_out[i]),
-                .ready_out (ready_out[i])
-            );
-        end
+        for (genvar i = 0; i < NUM_INPUTS; ++i) begin : g_out_buf
 
-    end else if (NUM_OUTPUTS > NUM_INPUTS) begin
-    
-        wire [NUM_INPUTS-1:0][NUM_REQS-1:0] valid_out_r;
-        wire [NUM_INPUTS-1:0][NUM_REQS-1:0] ready_out_r;
+            logic [NUM_REQS-1:0] ready_out_s;
 
-        for (genvar i = 0; i < NUM_INPUTS; ++i) begin
-            for (genvar j = 0; j < NUM_REQS; ++j) begin
-                assign valid_out_r[i][j] = valid_in[i] & (sel_in[i] == LOG_NUM_REQS'(j));
+            for (genvar r = 0; r < NUM_REQS; ++r) begin : g_r
+                localparam o = r * NUM_INPUTS + i;
+                if (o < NUM_OUTPUTS) begin : g_valid
+                    assign valid_out_w[o] = valid_in[i] && (sel_in[i] == LOG_NUM_REQS'(r));
+                    assign data_out_w[o] = data_in[i];
+                    assign ready_out_s[r] = ready_out_w[o];
+                end else begin : g_padding
+                    assign ready_out_s[r] = '0;
+                end
             end
-            assign ready_in[i] = ready_out_r[i][sel_in[i]];
+
+            assign ready_in[i] = ready_out_s[sel_in[i]];
         end
 
-        for (genvar i = 0; i < NUM_INPUTS; ++i) begin
-            for (genvar j = 0; j < NUM_REQS; ++j) begin
-                localparam ii = i * NUM_REQS + j;
-                if (ii < NUM_OUTPUTS) begin
-
-                    `RESET_RELAY (out_buf_reset, reset);
-
-                    VX_elastic_buffer #(
-                        .DATAW    (DATAW),
-                        .SIZE     (`OUT_REG_TO_EB_SIZE(OUT_REG)),
-                        .OUT_REG  (`OUT_REG_TO_EB_REG(OUT_REG))
-                    ) out_buf (
-                        .clk       (clk),
-                        .reset     (out_buf_reset),
-                        .valid_in  (valid_out_r[i][j]),
-                        .ready_in  (ready_out_r[i][j]),
-                        .data_in   (data_in[i]),                                                     
-                        .data_out  (data_out[ii]),
-                        .valid_out (valid_out[ii]),
-                        .ready_out (ready_out[ii])
-                    );
-                end else begin
-                    `UNUSED_VAR (valid_out_r[i][j])
-                    assign ready_out_r[i][j] = '0;
-                end                
-            end
-        end
-    
-    end else begin
+    end else begin : g_passthru
 
         // #Inputs == #Outputs
-    
+
         `UNUSED_VAR (sel_in)
 
-        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin
-
-            `RESET_RELAY_EN (out_buf_reset, reset, (NUM_OUTPUTS > 1));
-
-            VX_elastic_buffer #(
-                .DATAW    (DATAW),
-                .SIZE     (`OUT_REG_TO_EB_SIZE(OUT_REG)),
-                .OUT_REG  (`OUT_REG_TO_EB_REG(OUT_REG))
-            ) out_buf (
-                .clk       (clk),
-                .reset     (out_buf_reset),
-                .valid_in  (valid_in[i]),
-                .ready_in  (ready_in[i]),
-                .data_in   (data_in[i]),
-                .data_out  (data_out[i]),
-                .valid_out (valid_out[i]),
-                .ready_out (ready_out[i])
-            );
+        for (genvar i = 0; i < NUM_OUTPUTS; ++i) begin : g_out_buf
+            assign valid_out_w[i] = valid_in[i];
+            assign data_out_w[i]  = data_in[i];
+            assign ready_in[i]    = ready_out_w[i];
         end
-
     end
-    
+
+    for (genvar o = 0; o < NUM_OUTPUTS; ++o) begin : g_out_buf
+        VX_elastic_buffer #(
+            .DATAW   (DATAW),
+            .SIZE    (`TO_OUT_BUF_SIZE(OUT_BUF)),
+            .OUT_REG (`TO_OUT_BUF_REG(OUT_BUF))
+        ) out_buf (
+            .clk       (clk),
+            .reset     (reset),
+            .valid_in  (valid_out_w[o]),
+            .data_in   (data_out_w[o]),
+            .ready_in  (ready_out_w[o]),
+            .valid_out (valid_out[o]),
+            .data_out  (data_out[o]),
+            .ready_out (ready_out[o])
+        );
+    end
+
 endmodule
 `TRACING_ON

@@ -1,10 +1,10 @@
 // Copyright © 2019-2023
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 // http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,36 +13,33 @@
 
 #pragma once
 
-#include <string>
 #include <vector>
-#include <list>
-#include <stack>
-#include <queue>
-#include <unordered_map>
-#include <memory>
-#include <set>
 #include <simobject.h>
-#include <mem.h>
-#include "debug.h"
 #include "types.h"
-#include "arch.h"
-#include "decode.h"
-#include "warp.h"
+#include "emulator.h"
 #include "pipeline.h"
 #include "cache_sim.h"
-#include "shared_mem.h"
+#include "local_mem.h"
 #include "ibuffer.h"
 #include "scoreboard.h"
-#include "operand.h"
+
+#ifdef EXT_V_ENABLE
+#include "voperands.h"
+#include "vec_unit.h"
+#else
+#include "operands.h"
+#endif
+
 #include "dispatcher.h"
-#include "exe_unit.h"
-#include "dcrs.h"
+#include "func_unit.h"
+#include "mem_coalescer.h"
+#include "VX_config.h"
 
 namespace vortex {
 
 class Socket;
-
-using TraceSwitch = Mux<pipeline_trace_t*>;
+class Arch;
+class DCRS;
 
 class Core : public SimObject<Core> {
 public:
@@ -53,31 +50,47 @@ public:
     uint64_t sched_stalls;
     uint64_t ibuf_stalls;
     uint64_t scrb_stalls;
+    uint64_t opds_stalls;
     uint64_t scrb_alu;
     uint64_t scrb_fpu;
     uint64_t scrb_lsu;
     uint64_t scrb_sfu;
-    uint64_t scrb_wctl;
     uint64_t scrb_csrs;
+    uint64_t scrb_wctl;
+  #ifdef EXT_V_ENABLE
+    uint64_t vinstrs;
+    uint64_t scrb_vpu;
+  #endif
+  #ifdef EXT_TCU_ENABLE
+    uint64_t scrb_tcu;
+  #endif
     uint64_t ifetches;
     uint64_t loads;
     uint64_t stores;
     uint64_t ifetch_latency;
     uint64_t load_latency;
 
-    PerfStats() 
+    PerfStats()
       : cycles(0)
       , instrs(0)
       , sched_idle(0)
       , sched_stalls(0)
       , ibuf_stalls(0)
       , scrb_stalls(0)
+      , opds_stalls(0)
       , scrb_alu(0)
       , scrb_fpu(0)
       , scrb_lsu(0)
       , scrb_sfu(0)
-      , scrb_wctl(0)
       , scrb_csrs(0)
+      , scrb_wctl(0)
+    #ifdef EXT_V_ENABLE
+      , vinstrs(0)
+      , scrb_vpu(0)
+    #endif
+    #ifdef EXT_TCU_ENABLE
+      , scrb_tcu(0)
+    #endif
       , ifetches(0)
       , loads(0)
       , stores(0)
@@ -92,11 +105,12 @@ public:
   std::vector<SimPort<MemReq>> dcache_req_ports;
   std::vector<SimPort<MemRsp>> dcache_rsp_ports;
 
-  Core(const SimContext& ctx, 
-       uint32_t core_id, 
+  Core(const SimContext& ctx,
+       uint32_t core_id,
        Socket* socket,
-       const Arch &arch, 
-       const DCRS &dcrs);
+       const Arch &arch,
+       const DCRS &dcrs
+  );
 
   ~Core();
 
@@ -105,52 +119,65 @@ public:
   void tick();
 
   void attach_ram(RAM* ram);
+#ifdef VM_ENABLE
+  void set_satp(uint64_t satp);
+#endif
 
   bool running() const;
 
-  void resume();
+  void resume(uint32_t wid);
+
+  bool barrier(uint32_t bar_id, uint32_t count, uint32_t wid);
+
+  bool wspawn(uint32_t num_warps, Word nextPC);
 
   uint32_t id() const {
     return core_id_;
-  }
-
-  Socket* socket() const {
-    return socket_;
   }
 
   const Arch& arch() const {
     return arch_;
   }
 
-  const DCRS& dcrs() const {
-    return dcrs_;
+  Socket* socket() const {
+    return socket_;
   }
 
-  uint32_t get_csr(uint32_t addr, uint32_t tid, uint32_t wid);
-  
-  void set_csr(uint32_t addr, uint32_t value, uint32_t tid, uint32_t wid);
+  const LocalMem::Ptr& local_mem() const {
+    return local_mem_;
+  }
 
-  void wspawn(uint32_t num_warps, Word nextPC);
-  
-  void barrier(uint32_t bar_id, uint32_t count, uint32_t warp_id);
+  const MemCoalescer::Ptr& mem_coalescer(uint32_t idx) const {
+    return mem_coalescers_.at(idx);
+  }
 
-  AddrType get_addr_type(uint64_t addr);
+  void dcache_read(void* data, uint64_t addr, uint32_t size) {
+    return emulator_.dcache_read(data, addr, size);
+  }
 
-  void icache_read(void* data, uint64_t addr, uint32_t size);
+  void dcache_write(const void* data, uint64_t addr, uint32_t size) {
+    return emulator_.dcache_write(data, addr, size);
+  }
 
-  void dcache_read(void* data, uint64_t addr, uint32_t size);
+#ifdef EXT_TCU_ENABLE
+  TensorUnit::Ptr& tensor_unit() {
+    return tensor_unit_;
+  }
+#endif
 
-  void dcache_write(const void* data, uint64_t addr, uint32_t size);
+#ifdef EXT_V_ENABLE
+  VecUnit::Ptr& vec_unit() {
+    return vec_unit_;
+  }
+#endif
 
-  void dcache_amo_reserve(uint64_t addr);
+  auto& trace_pool() {
+    return trace_pool_;
+  }
 
-  bool dcache_amo_check(uint64_t addr);
+  const PerfStats& perf_stats() const;
 
-  void trigger_ecall();
-
-  void trigger_ebreak();
-
-  bool check_exit(Word* exitcode, bool riscv_test) const;
+  int get_exitcode() const;
 
 private:
 
@@ -160,54 +187,47 @@ private:
   void issue();
   void execute();
   void commit();
-  
-  void writeToStdOut(const void* data, uint64_t addr, uint32_t size);
-
-  void cout_flush();
 
   uint32_t core_id_;
   Socket* socket_;
   const Arch& arch_;
-  const DCRS &dcrs_;
-  
-  const Decoder decoder_;
-  MemoryUnit mmu_;
 
-  std::vector<std::shared_ptr<Warp>> warps_;  
-  std::vector<WarpMask> barriers_;
-  std::vector<Byte> fcsrs_;
+#ifdef EXT_TCU_ENABLE
+  TensorUnit::Ptr tensor_unit_;
+#endif
+
+#ifdef EXT_V_ENABLE
+  VecUnit::Ptr vec_unit_;
+#endif
+
+  Emulator emulator_;
+
   std::vector<IBuffer> ibuffers_;
   Scoreboard scoreboard_;
-  std::vector<Operand::Ptr> operands_;
+  std::vector<Operands::Ptr> operands_;
   std::vector<Dispatcher::Ptr> dispatchers_;
-  std::vector<ExeUnit::Ptr> exe_units_;
-  SharedMem::Ptr shared_mem_;
-  std::vector<SMemDemux::Ptr> smem_demuxs_;
+  std::vector<FuncUnit::Ptr> func_units_;
+  LocalMem::Ptr local_mem_;
+  std::vector<LocalMemSwitch::Ptr> lmem_switch_;
+  std::vector<MemCoalescer::Ptr> mem_coalescers_;
 
   PipelineLatch fetch_latch_;
   PipelineLatch decode_latch_;
-  
-  HashTable<pipeline_trace_t*> pending_icache_;
-  WarpMask active_warps_;
-  WarpMask stalled_warps_;
-  uint64_t issued_instrs_;
-  uint64_t committed_instrs_;
-  bool exited_;
+
+  HashTable<instr_trace_t*> pending_icache_;
+  std::list<instr_trace_t*, PoolAllocator<instr_trace_t*, 64>> pending_instrs_;
 
   uint64_t pending_ifetches_;
 
-  std::unordered_map<int, std::stringstream> print_bufs_;
+  mutable PerfStats perf_stats_;
 
-  std::vector<std::vector<CSRs>> csrs_;
-  
-  PerfStats perf_stats_;
-  
-  std::vector<TraceSwitch::Ptr> commit_arbs_;
+  std::vector<TraceArbiter::Ptr> commit_arbs_;
 
   uint32_t commit_exe_;
-  uint32_t ibuffer_idx_;
+  std::vector<Arbiter> ibuffer_arbs_;
 
-  friend class Warp;
+  PoolAllocator<instr_trace_t, 64> trace_pool_;
+
   friend class LsuUnit;
   friend class AluUnit;
   friend class FpuUnit;

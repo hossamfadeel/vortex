@@ -1,10 +1,12 @@
-XLEN ?= 32
-DESTDIR ?= $(CURDIR)
-SIM_DIR = $(abspath ../../sim)
-HW_DIR = $(abspath ../../hw)
+include ../common.mk
 
-CXXFLAGS += -std=c++11 -Wall -Wextra -pedantic -Wfatal-errors
-CXXFLAGS += -I../include -I../common -I$(HW_DIR) -I$(SIM_DIR)/rtlsim -I$(SIM_DIR)/common
+DESTDIR ?= $(CURDIR)/..
+
+CONFIG_FILE := $(DESTDIR)/rtlsim_rt_config.stamp
+SRC_DIR := $(VORTEX_HOME)/runtime/rtlsim
+
+CXXFLAGS += -std=c++17 -Wall -Wextra -pedantic -Wfatal-errors
+CXXFLAGS += -I$(INC_DIR) -I$(ROOT_DIR)/hw -I$(SIM_DIR)/rtlsim -I$(SW_COMMON_DIR) -I$(RT_COMMON_DIR)
 CXXFLAGS += -DXLEN_$(XLEN)
 
 # Position independent code
@@ -13,34 +15,46 @@ CXXFLAGS += -fPIC
 # Add external configuration
 CXXFLAGS += $(CONFIGS)
 
-# Dump perf stats
-CXXFLAGS += -DDUMP_PERF_STATS
-
 LDFLAGS += -shared -pthread
 LDFLAGS += -L$(DESTDIR) -lrtlsim
 
-SRCS = vortex.cpp ../common/utils.cpp
+SRCS := $(SRC_DIR)/vortex.cpp
 
-# Debugigng
+# Debugging
 ifdef DEBUG
 	CXXFLAGS += -g -O0
-else    
+else
 	CXXFLAGS += -O2 -DNDEBUG
 endif
 
-# Enable perf counters
-ifdef PERF
-	CXXFLAGS += -DPERF_ENABLE
-endif
+PROJECT := libvortex-rtlsim.so
 
-PROJECT = libvortex.so
+.PHONY: all force driver clean-driver clean-runtime clean
 
 all: $(DESTDIR)/$(PROJECT)
-	
-$(DESTDIR)/$(PROJECT): $(SRCS)
-	DESTDIR=$(DESTDIR) $(MAKE) -C $(SIM_DIR)/rtlsim $(DESTDIR)/librtlsim.so
+
+driver: $(DESTDIR)/librtlsim.so
+
+$(DESTDIR)/librtlsim.so: force
+	DESTDIR=$(DESTDIR) $(MAKE) -C $(ROOT_DIR)/sim/rtlsim $(DESTDIR)/librtlsim.so
+
+$(DESTDIR)/$(PROJECT): $(SRCS) $(DESTDIR)/librtlsim.so $(CONFIG_FILE)
 	$(CXX) $(CXXFLAGS) $(SRCS) $(LDFLAGS) -o $@
 
-clean:
-	DESTDIR=$(DESTDIR) $(MAKE) -C $(SIM_DIR)/rtlsim clean
-	rm -rf $(DESTDIR)/$(PROJECT) *.o
+# updates the timestamp when flags changed.
+$(CONFIG_FILE): force
+	@mkdir -p $(@D)
+	@printf '%s\n' "$(CXXFLAGS)" > $@.tmp
+	@if ! cmp -s $@.tmp $@; then \
+	  mv $@.tmp $@; \
+	else \
+	  rm $@.tmp; \
+	fi
+
+clean-driver:
+	DESTDIR=$(DESTDIR) $(MAKE) -C $(ROOT_DIR)/sim/rtlsim clean-lib
+
+clean-runtime:
+	rm -f $(DESTDIR)/$(PROJECT)
+
+clean: clean-driver clean-runtime

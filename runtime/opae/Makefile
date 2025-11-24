@@ -1,12 +1,16 @@
-XLEN ?= 32
-TARGET ?= opaesim
-DESTDIR ?= $(CURDIR)
-SIM_DIR = $(abspath ../../sim)
-HW_DIR = $(abspath ../../hw)
-SYN_DIR = $(HW_DIR)/syn/altera/opae
+ROOT_DIR := $(realpath ../..)
+include ../common.mk
 
-CXXFLAGS += -std=c++11 -Wall -Wextra -pedantic -Wfatal-errors
-CXXFLAGS += -I../include -I../common -I$(HW_DIR) -I$(DESTDIR)
+TARGET ?= opaesim
+
+DESTDIR ?= $(CURDIR)/..
+
+SYN_DIR := $(HW_DIR)/syn/altera/opae
+CONFIG_FILE := $(DESTDIR)/opae_config.stamp
+SRC_DIR := $(VORTEX_HOME)/runtime/opae
+
+CXXFLAGS += -std=c++17 -Wall -Wextra -pedantic -Wfatal-errors
+CXXFLAGS += -I$(INC_DIR) -I$(ROOT_DIR)/hw -I$(DESTDIR) -I$(SW_COMMON_DIR) -I$(RT_COMMON_DIR)
 CXXFLAGS += -DXLEN_$(XLEN)
 
 # Position independent code
@@ -15,55 +19,63 @@ CXXFLAGS += -fPIC
 # Add external configuration
 CXXFLAGS += $(CONFIGS)
 
-# Dump perf stats
-CXXFLAGS += -DDUMP_PERF_STATS
-
 LDFLAGS += -shared -luuid -ldl -pthread
 
-SRCS = vortex.cpp driver.cpp ../common/utils.cpp
+SRCS = $(SRC_DIR)/vortex.cpp $(SRC_DIR)/driver.cpp
 
 # set up target types
 ifeq ($(TARGET), opaesim)
-	OPAESIM = $(DESTDIR)/libopae-c-sim.so
+	BUILD_DEPS = $(DESTDIR)/libopae-c-sim.so
 	CXXFLAGS += -DOPAESIM -I$(SIM_DIR)/opaesim
-	LDFLAGS += -L$(DESTDIR) -lopae-c-sim
 else
-	CXXFLAGS += -I$(SYN_DIR)
-	ifeq ($(TARGET), asesim)
-		CXXFLAGS += -DASESIM
-	else
-		CXXFLAGS += -DFPGA
-	endif
+	BUILD_DEPS = $(ROOT_DIR)/hw/syn/altera/opae/vortex_afu.h
+	CXXFLAGS += -I$(SYN_DIR) -I$(ROOT_DIR)/hw/syn/altera/opae
 endif
 
-# Debugigng
+# Debugging
 ifdef DEBUG
 	CXXFLAGS += -g -O0
-else    
+else
 	CXXFLAGS += -O2 -DNDEBUG
 endif
 
 # Enable scope logic analyzer
 ifdef SCOPE
-	CXXFLAGS += -DSCOPE	
-	SRCS += ../common/scope.cpp
+	CXXFLAGS += -DSCOPE
+	SRCS += $(RT_COMMON_DIR)/scope.cpp
 endif
 
-# Enable perf counters
-ifdef PERF
-	CXXFLAGS += -DPERF_ENABLE
-endif
+PROJECT := libvortex-opae.so
 
-PROJECT = libvortex.so
+.PHONY: all force driver clean-driver clean-runtime clean
 
 all: $(DESTDIR)/$(PROJECT)
 
-$(DESTDIR)/libopae-c-sim.so:
-	DESTDIR=$(DESTDIR) $(MAKE) -C $(SIM_DIR)/opaesim $(DESTDIR)/libopae-c-sim.so
+$(ROOT_DIR)/hw/syn/altera/opae/vortex_afu.h:
+	$(MAKE) -C $(ROOT_DIR)/hw/syn/altera/opae swconfig
 
-$(DESTDIR)/$(PROJECT): $(SRCS) $(OPAESIM)
+driver: $(DESTDIR)/libopae-c-sim.so
+
+$(DESTDIR)/libopae-c-sim.so: force
+	DESTDIR=$(DESTDIR) $(MAKE) -C $(ROOT_DIR)/sim/opaesim $(DESTDIR)/libopae-c-sim.so
+
+$(DESTDIR)/$(PROJECT): $(SRCS) $(BUILD_DEPS) $(CONFIG_FILE)
 	$(CXX) $(CXXFLAGS) $(SRCS) $(LDFLAGS) -o $@
 
-clean:
-	DESTDIR=$(DESTDIR) $(MAKE) -C $(SIM_DIR)/opaesim clean
-	rm -rf $(DESTDIR)/$(PROJECT)
+# updates the timestamp when flags changed.
+$(CONFIG_FILE): force
+	@mkdir -p $(@D)
+	@printf '%s\n' "$(CXXFLAGS)" > $@.tmp
+	@if ! cmp -s $@.tmp $@; then \
+	  mv $@.tmp $@; \
+	else \
+	  rm $@.tmp; \
+	fi
+
+clean-driver:
+	DESTDIR=$(DESTDIR) $(MAKE) -C $(ROOT_DIR)/sim/opaesim clean
+
+clean-runtime:
+	rm -f $(DESTDIR)/$(PROJECT)
+
+clean: clean-driver clean-runtime
